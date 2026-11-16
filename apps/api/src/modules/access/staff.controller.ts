@@ -95,6 +95,18 @@ export class StaffController {
     return paged(items, total, q);
   }
 
+  /** Names of active staff who can work on a brand, for assignment pickers (e.g. support tickets). */
+  @Get('staff/assignable')
+  @Permissions('support.read')
+  async assignable(@CurrentStaff() staff: Staff, @Query('brandId', ParseUUIDPipe) brandId: string) {
+    if (!staff.allBrands && !staff.brandIds.includes(brandId)) throw forbidden();
+    return this.prisma.user.findMany({
+      where: { deletedAt: null, status: 'ACTIVE', OR: [{ allBrands: true }, { brandAssignments: { some: { brandId } } }], roles: { some: { role: { permissions: { some: { permission: { key: 'support.manage' } } } } } } },
+      select: { id: true, fullName: true },
+      orderBy: { fullName: 'asc' },
+    });
+  }
+
   @Post('staff')
   @Permissions('staff.manage')
   async create(@CurrentStaff() staff: Staff, @Body() dto: CreateStaffDto) {

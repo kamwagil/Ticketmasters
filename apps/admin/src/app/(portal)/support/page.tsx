@@ -13,9 +13,9 @@ import { Can } from '@/lib/auth';
 import { humanize, number } from '@/lib/format';
 import { useAction, useDebounced, usePaged, useQuery } from '@/lib/hooks';
 
-export const SUPPORT_STATUSES = ['OPEN', 'PENDING_CUSTOMER', 'PENDING_INTERNAL', 'RESOLVED', 'CLOSED'];
-export const SUPPORT_PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
-export const SUPPORT_ISSUES = ['GENERAL_ENQUIRY', 'TICKET_DELIVERY', 'PAYMENT', 'REFUND_REQUEST', 'EVENT_CANCELLATION', 'ORDER_ENQUIRY'];
+const SUPPORT_STATUSES = ['OPEN', 'PENDING_CUSTOMER', 'PENDING_INTERNAL', 'RESOLVED', 'CLOSED'];
+const SUPPORT_PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
+const SUPPORT_ISSUES = ['GENERAL_ENQUIRY', 'TICKET_DELIVERY', 'PAYMENT', 'REFUND_REQUEST', 'EVENT_CANCELLATION', 'ORDER_ENQUIRY'];
 const opts = (xs: string[]) => xs.map((x) => ({ value: x, label: humanize(x) }));
 
 function NewTicketDialog({ onClose, onDone }: { onClose: () => void; onDone: (t: any) => void }) {

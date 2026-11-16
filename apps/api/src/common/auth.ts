@@ -2,7 +2,7 @@ import {
   CanActivate, createParamDecorator, ExecutionContext, Injectable, SetMetadata, UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Brand } from '@prisma/client';
+import { Brand, Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import * as jwt from 'jsonwebtoken';
 import { config } from './config';
@@ -177,6 +177,9 @@ export class StaffGuard implements CanActivate {
  * The brand is never taken from a request parameter. The claimed domain
  * (X-Storefront-Domain, or the browser Origin) must be a verified domain of that brand.
  */
+const STOREFRONT_CACHE_MS = config.isTest ? 0 : Number(process.env.STOREFRONT_CACHE_MS ?? 5000);
+const storefrontCache = new Map<string, { record: Prisma.StorefrontApiKeyGetPayload<{ include: { brand: { include: { domains: true } } } }> | null; until: number }>();
+
 @Injectable()
 export class StorefrontGuard implements CanActivate {
   constructor(private prisma: PrismaService, private reflector: Reflector, private redis: RedisService) {}
@@ -187,10 +190,16 @@ export class StorefrontGuard implements CanActivate {
     if (!key) throw new UnauthorizedException('Storefront API key required');
     const keyHash = sha256(key);
 
-    const record = await this.prisma.storefrontApiKey.findUnique({
-      where: { keyHash },
-      include: { brand: { include: { domains: true } } },
-    });
+    // Every storefront request needs this lookup, so it is cached in-process for a few seconds.
+    // A revoked key or a suspended brand therefore takes effect within STOREFRONT_CACHE_MS on each replica.
+    const hit = storefrontCache.get(keyHash);
+    const record = hit && hit.until > Date.now()
+      ? hit.record
+      : await this.prisma.storefrontApiKey.findUnique({ where: { keyHash }, include: { brand: { include: { domains: true } } } });
+    if (!hit || hit.until <= Date.now()) {
+      if (storefrontCache.size > 5000) storefrontCache.clear();
+      if (record && STOREFRONT_CACHE_MS > 0) storefrontCache.set(keyHash, { record, until: Date.now() + STOREFRONT_CACHE_MS });
+    }
     if (!record || record.revokedAt) throw new UnauthorizedException('Invalid storefront API key');
 
     const verified = record.brand.domains.filter((d) => d.verifiedAt);

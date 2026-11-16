@@ -96,27 +96,48 @@ export class StorefrontEventsController {
     );
   }
 
+  /**
+   * Event presentation (texts, images, prices, sales windows) is cached for a few seconds;
+   * stock is read from the database on every call and overlaid, so availability is never stale.
+   */
+  private async detailWithLiveStock(brandId: string, idOrSlug: string) {
+    const base = await this.redis.cached(`sf:events:${brandId}:detail:${idOrSlug.toLowerCase()}`, 15, async () =>
+      this.catalog.present(await this.catalog.storefrontEvent(brandId, idOrSlug)),
+    );
+    const stock = await this.inventory.availability(base.ticketCategories.map((c) => c.id));
+    return {
+      ...base,
+      ticketCategories: base.ticketCategories.map((c) => {
+        const a = stock.get(c.id);
+        const blocker = c.unavailableReason && c.unavailableReason !== 'SOLD_OUT' ? c.unavailableReason : c.onSale ? null : c.unavailableReason;
+        const soldOut = !a || a.available <= 0;
+        return {
+          ...c,
+          onSale: !blocker && !soldOut,
+          unavailableReason: blocker ?? (soldOut ? 'SOLD_OUT' : null),
+          available: a && a.available <= 20 ? Math.max(a.available, 0) : null,
+          lowStock: !!a && a.available > 0 && a.available <= 20,
+        };
+      }),
+    };
+  }
+
   /** Event detail with this storefront's presentation and live availability. */
   @Get(':idOrSlug')
   @RateLimit({ limit: 6000, windowSec: 60, by: 'storefront' })
-  async detail(@Storefront() sf: StorefrontCtx, @Param('idOrSlug') idOrSlug: string) {
-    const event = await this.catalog.storefrontEvent(sf.brand.id, idOrSlug);
-    const availability = await this.inventory.availability(event.ticketCategories.map((c) => c.id));
-    return this.catalog.present(event, availability);
+  detail(@Storefront() sf: StorefrontCtx, @Param('idOrSlug') idOrSlug: string) {
+    return this.detailWithLiveStock(sf.brand.id, idOrSlug);
   }
 
-  /** Live inventory for an event. Always read from the database, never cached. */
+  /** Live inventory for an event. Stock always comes from the database, never from a cache. */
   @Get(':idOrSlug/inventory')
   @RateLimit({ limit: 12000, windowSec: 60, by: 'storefront' })
   async liveInventory(@Storefront() sf: StorefrontCtx, @Param('idOrSlug') idOrSlug: string) {
-    const event = await this.catalog.storefrontEvent(sf.brand.id, idOrSlug);
-    const availability = await this.inventory.availability(event.ticketCategories.map((c) => c.id));
+    const event = await this.detailWithLiveStock(sf.brand.id, idOrSlug);
     return {
       eventId: event.id,
       asOf: new Date(),
-      categories: this.catalog.present(event, availability).ticketCategories.map((c) => ({
-        id: c.id, onSale: c.onSale, unavailableReason: c.unavailableReason, available: c.available, lowStock: c.lowStock,
-      })),
+      categories: event.ticketCategories.map((c) => ({ id: c.id, onSale: c.onSale, unavailableReason: c.unavailableReason, available: c.available, lowStock: c.lowStock })),
     };
   }
 }

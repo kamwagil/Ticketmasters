@@ -60,7 +60,9 @@ export default function SupportTicketPage() {
   const { can, user } = useAuth();
   const toast = useToast();
   const { data: t, loading, error, reload } = useQuery<any>(`/v1/admin/support/tickets/${id}`, undefined, { scoped: false, refreshMs: 30_000 });
-  const staff = useQuery<{ items: any[] }>(t && can('staff.read') ? '/v1/admin/staff' : null, { brandId: t?.brandId, pageSize: 100 }, { scoped: false });
+  // Colleagues who can handle tickets for this ticket's brand (available to every support agent).
+  const assignable = useQuery<{ id: string; fullName: string }[]>(t ? '/v1/admin/staff/assignable' : null, { brandId: t?.brandId }, { scoped: false });
+  const staff = { data: { items: (assignable.data ?? []).map((u) => ({ ...u, status: 'ACTIVE' })) } };
   const [body, setBody] = useState('');
   const [internal, setInternal] = useState(false);
   const [escalate, setEscalate] = useState(false);
@@ -165,7 +167,7 @@ export default function SupportTicketPage() {
               <Field label="Status"><SelectInput value={t.status} disabled={!manage || updating.loading} onChange={(e) => patch({ status: e.target.value }, 'Status updated')} options={opts(STATUSES)} /></Field>
               <Field label="Priority"><SelectInput value={t.priority} disabled={!manage || updating.loading} onChange={(e) => patch({ priority: e.target.value }, 'Priority updated')} options={opts(PRIORITIES)} /></Field>
               <Field label="Issue type"><SelectInput value={t.issueType} disabled={!manage || updating.loading} onChange={(e) => patch({ issueType: e.target.value }, 'Issue type updated')} options={opts(ISSUES)} /></Field>
-              <Field label="Assignee" hint={can('staff.read') ? 'Staff with access to this brand' : undefined}>
+              <Field label="Assignee" hint="Support staff with access to this brand">
                 <SelectInput value={t.assignedToId ?? ''} disabled={!manage || updating.loading} onChange={(e) => patch({ assignedToId: e.target.value || null }, e.target.value ? 'Ticket assigned' : 'Ticket unassigned')} placeholder="Unassigned" options={assignees} />
               </Field>
               <KeyValue columns={1} items={[{ label: 'Originating brand', value: <BrandChip brand={t.brand} /> }, ...(t.resolvedAt ? [{ label: 'Resolved', value: <DateTime value={t.resolvedAt} /> }] : [])]} />

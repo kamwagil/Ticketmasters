@@ -1,0 +1,157 @@
+# Production-shaped stack. Usage:
+#   cp .env.production.example .env.production   (fill in real secrets)
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build --scale api=3 --scale worker=2
+# For higher traffic move to an orchestrator (Kubernetes / ECS) with the same images: the API and
+# workers are stateless; PostgreSQL and Redis should then be managed services with backups and failover.
+name: ctp-prod
+
+x-api-env: &api-env
+  NODE_ENV: production
+  PORT: "4000"
+  API_PUBLIC_URL: ${API_PUBLIC_URL}
+  ADMIN_ORIGIN: ${ADMIN_ORIGIN}
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public&connection_limit=${DB_POOL_PER_PROCESS:-15}
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+  JWT_CUSTOMER_SECRET: ${JWT_CUSTOMER_SECRET}
+  DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY}
+  QUEUE_MODE: bullmq
+  QUEUE_PREFIX: ctp
+  SMTP_HOST: ${SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_SECURE: ${SMTP_SECURE:-false}
+  SMTP_USER: ${SMTP_USER}
+  SMTP_PASS: ${SMTP_PASS}
+  AT_USERNAME: ${AT_USERNAME:-}
+  AT_API_KEY: ${AT_API_KEY:-}
+  AT_SENDER_ID: ${AT_SENDER_ID:-}
+  WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+  WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+  STORAGE_DRIVER: ${STORAGE_DRIVER:-s3}
+  S3_ENDPOINT: ${S3_ENDPOINT:-}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-ctp-media}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+  S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
+  METRICS_TOKEN: ${METRICS_TOKEN}
+  ALLOW_SANDBOX_PROVIDER: "false"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /wal-archive/%f && cp %p /wal-archive/%f
+      - -c
+      - log_min_duration_statement=500
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - walarchive:/wal-archive
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Applies migrations and reference data (permissions, roles, currencies, templates) once per deploy.
+  migrate:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    environment:
+      <<: *api-env
+      SEED_DEMO: "false"
+    command: ["sh", "-c", "npx prisma migrate deploy && node dist/seed-base.js"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      RUN_WORKERS: "false"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    stop_grace_period: 30s
+
+  worker:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      RUN_WORKERS: "true"
+    command: ["node", "dist/worker.js"]
+    healthcheck: { disable: true }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    stop_grace_period: 60s
+
+  admin:
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      args: { API_URL: "http://api:4000" }
+    restart: unless-stopped
+    depends_on: [api]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/proxy.inc:/etc/nginx/proxy.inc:ro
+    depends_on: [api, admin]
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+    volumes:
+      - backups:/backups
+      - ./infra/scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["sh", "-c", "while true; do sh /backup.sh || echo 'BACKUP FAILED'; sleep $$BACKUP_INTERVAL_SECONDS; done"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata: {}
+  walarchive: {}
+  redisdata: {}
+  backups: {}

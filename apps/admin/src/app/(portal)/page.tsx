@@ -9,6 +9,9 @@ import {
   StatusBadge,
 } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
+import { NAV } from '@/components/shell';
+import { useRouter as useLandingRouter } from 'next/navigation';
+import { useEffect as useLandingEffect } from 'react';
 import { humanize, number, percent } from '@/lib/format';
 import { useQuery } from '@/lib/hooks';
 
@@ -71,7 +74,7 @@ function Feed<T>({ title, href, items, loading, render, empty }: { title: string
   );
 }
 
-export default function OverviewPage() {
+function OverviewPage() {
   const { brand, brandId, brands, setBrandId, user, can } = useAuth();
   const [range, setRange] = useState(initialRange('30d'));
   const [metric, setMetric] = useState('revenue');
@@ -291,4 +294,19 @@ export default function OverviewPage() {
       )}
     </>
   );
+}
+
+/**
+ * Landing page. Staff whose role has no dashboard access (support agents, scanners, ...)
+ * are taken straight to the first section they can use instead of seeing a refused dashboard.
+ */
+export default function Landing() {
+  const { can } = useAuth();
+  const router = useLandingRouter();
+  const allowed = can('reports.read');
+  const target = allowed ? null : (NAV.find((n) => n.href !== '/' && can(n.permission))?.href ?? (can('tickets.scan') ? '/scan' : '/account'));
+  useLandingEffect(() => {
+    if (target) router.replace(target);
+  }, [target, router]);
+  return allowed ? <OverviewPage /> : null;
 }

@@ -22,7 +22,7 @@ function pivotRevenue(points: any[] | undefined) {
   const currencies = [...new Set((points ?? []).map((p) => p.currency as string))].sort();
   const rows = new Map<string, Record<string, unknown>>();
   for (const p of points ?? []) {
-    const row = rows.get(p.bucket) ?? { bucket: p.bucket };
+    const row: Record<string, unknown> = rows.get(p.bucket) ?? { bucket: p.bucket };
     row[p.currency] = Number(p.value) / 100;
     rows.set(p.bucket, row);
   }

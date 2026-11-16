@@ -370,6 +370,8 @@ export class CatalogController {
         if (['CANCELLED', 'ARCHIVED', 'COMPLETED'].includes(before.status)) throw new AppError('INVALID_TRANSITION', `A ${before.status} event cannot be published`, 409);
         const cats = await this.prisma.ticketCategory.count({ where: { eventId: id } });
         if (!cats) throw new AppError('NO_TICKET_CATEGORIES', 'Add at least one ticket category before publishing', 409);
+        // Ticket revenue is owed to someone: without an organizer the promoter share could not be settled.
+        if (!before.organizerId) throw new AppError('ORGANIZER_REQUIRED', 'Assign an organizer before publishing so ticket revenue can be settled', 409);
         Object.assign(data, { status: 'PUBLISHED', publishAt: null });
         break;
       }

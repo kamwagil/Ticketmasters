@@ -80,7 +80,7 @@ export async function checkoutAction(input: CheckoutInput): Promise<{ ok: boolea
       returnUrl: `${s.origin}/orders/return`,
     },
   });
-  if (!r.ok) return { ok: false, error: r.error.message, code: r.error.code };
+  if (!r.ok) return { ok: false, error: r.error.message.replace(/\bcustomer\.(\w+)/g, (_, k: string) => (k === 'fullName' ? 'full name' : k)), code: r.error.code };
   const orderUrl = `/orders/${r.data.orderReference}?email=${encodeURIComponent(email)}`;
   (await cookies()).set('sf_co', JSON.stringify({ ref: r.data.orderReference, email }), { httpOnly: true, sameSite: 'lax', secure: s.origin.startsWith('https://'), path: '/orders', maxAge: 2 * 3600 });
   return { ok: true, redirectTo: r.data.payment?.checkoutUrl ?? orderUrl };

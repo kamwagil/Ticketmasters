@@ -146,6 +146,8 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
   const last = useRef<{ code: string; at: number }>({ code: '', at: 0 });
   const overlayUntil = useRef(0);
   const device = useRef('');
+  const syncRunning = useRef(false);
+  const submitRef = useRef<(code: string) => void>(() => undefined);
 
   const [camera, setCamera] = useState<'starting' | 'on' | 'denied' | 'unavailable' | 'off'>('starting');
   const [outcome, setOutcome] = useState<Outcome | null>(null);
@@ -178,8 +180,10 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
 
   // ── Sync of offline scans ──
   const sync = useCallback(async () => {
+    if (syncRunning.current) return;
     const q = await readQueue();
     if (!q.length) return;
+    syncRunning.current = true;
     setSyncing(true);
     let synced = 0;
     const found: string[] = [];
@@ -208,6 +212,7 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
       if (e instanceof ApiError) setNotice({ tone: 'bad', text: `Sync failed: ${e.message}` });
       else setNetFail(true); // still no connection; the queue is kept
     } finally {
+      syncRunning.current = false;
       setSyncing(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -309,6 +314,9 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
     }
   }, [session, show, validateOffline, pending, sync, stats]);
 
+  // The camera loop starts once; it always calls the latest submit through this ref.
+  submitRef.current = (c: string) => void submit(c);
+
   // ── Camera ──
   useEffect(() => {
     let stream: MediaStream | null = null;
@@ -348,7 +356,7 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
           // The same code stays in view for a while: submit it once, then ignore it for 5 seconds.
           if (text === last.current.code && Date.now() - last.current.at < 5000) return;
           last.current = { code: text, at: Date.now() };
-          void submit(text);
+          submitRef.current(text);
         }, 125);
       } catch (e) {
         const name = (e as DOMException)?.name;
@@ -363,7 +371,8 @@ function Scanner({ session, onExit }: { session: Session; onExit: () => void }) 
       stream?.getTracks().forEach((t) => t.stop());
       void wake?.release?.().catch(() => undefined);
     };
-  }, [submit]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const s = stats.data;
 

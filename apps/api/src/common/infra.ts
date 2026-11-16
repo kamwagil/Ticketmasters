@@ -90,7 +90,7 @@ export class QueueService implements OnModuleDestroy {
   private queues = new Map<string, Queue>();
   private workers: Worker[] = [];
   private started = false;
-  readonly inline = config.queueMode === 'inline';
+  inline = config.queueMode === 'inline';
 
   private connection() {
     const u = new URL(config.redisUrl);
@@ -112,6 +112,7 @@ export class QueueService implements OnModuleDestroy {
     if (!q) {
       q = new Queue(name, {
         connection: this.connection(),
+        prefix: config.queuePrefix,
         defaultJobOptions: {
           attempts: 5,
           backoff: { type: 'exponential', delay: 2000 },
@@ -147,12 +148,13 @@ export class QueueService implements OnModuleDestroy {
   /** Starts workers and repeatable schedules. Called once on boot when RUN_WORKERS=true. */
   async start(schedules: { queue: string; everyMs: number }[]) {
     if (this.inline || this.started) return;
+    if (this.handlers.size === 0) throw new Error('QueueService.start() called before any job handler was registered (call app.init() first)');
     this.started = true;
     for (const [name, { handler, concurrency }] of this.handlers) {
       const w = new Worker(
         name,
         async (job) => runWithContext(() => handler(job.data), job.data?._cid),
-        { connection: this.connection(), concurrency },
+        { connection: this.connection(), concurrency, prefix: config.queuePrefix },
       );
       w.on('failed', (job, err) => log.error('job_failed', { queue: name, jobId: job?.id, attempts: job?.attemptsMade, error: err.message }));
       w.on('error', (e) => log.error('worker_error', { queue: name, error: e.message }));

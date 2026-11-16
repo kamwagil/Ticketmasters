@@ -98,8 +98,8 @@ export const AllowSuspendedBrand = () => SetMetadata(ALLOW_SUSPENDED, true);
 export const signStaffToken = (userId: string, sessionId: string) =>
   jwt.sign({ sub: userId, sid: sessionId, typ: 'staff' }, config.jwtAccessSecret, { expiresIn: config.accessTokenTtlSec, algorithm: 'HS256' });
 
-export const signCustomerToken = (c: CustomerCtx) =>
-  jwt.sign({ sub: c.relationshipId, cid: c.customerId, bid: c.brandId, typ: 'customer' }, config.jwtCustomerSecret, {
+export const signCustomerToken = (c: CustomerCtx & { tokenVersion: number }) =>
+  jwt.sign({ sub: c.relationshipId, cid: c.customerId, bid: c.brandId, ver: c.tokenVersion, typ: 'customer' }, config.jwtCustomerSecret, {
     expiresIn: config.customerTokenTtlSec,
     algorithm: 'HS256',
   });
@@ -248,6 +248,8 @@ export class CustomerGuard implements CanActivate {
     }
     const rel = await this.prisma.customerBrandRelationship.findUnique({ where: { id: claims.sub } });
     if (!rel || rel.status !== 'ACTIVE' || rel.brandId !== claims.bid) throw new UnauthorizedException('Account is not active');
+    // Tokens issued before a password change or reset carry an older version and stop working at once.
+    if (claims.ver !== rel.tokenVersion) throw new UnauthorizedException('Session has expired, please sign in again');
     // customerId is read from the DB: it changes when accounts are linked after verification.
     req.customer = { relationshipId: rel.id, customerId: rel.customerId, brandId: rel.brandId };
     return true;

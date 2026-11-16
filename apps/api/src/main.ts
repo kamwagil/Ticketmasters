@@ -14,6 +14,9 @@ async function main() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, logger: ['error', 'warn'] });
   configureApp(app);
   SwaggerModule.setup('docs', app, buildOpenApi(app), { jsonDocumentUrl: 'docs/openapi.json' });
+  // init() runs every module's onModuleInit, which is where job handlers are registered.
+  // Workers must start after that, or they would start with no handlers at all.
+  await app.init();
   if (config.runWorkers) await app.get(QueueService).start(SCHEDULES);
   await app.listen(config.port);
   log.info('api_started', { port: config.port, env: config.env, workers: config.runWorkers, queueMode: config.queueMode });

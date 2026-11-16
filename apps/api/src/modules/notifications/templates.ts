@@ -11,7 +11,7 @@ export const NOTIFICATION_TYPES = [
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 /** Types a customer cannot opt out of because they are needed to deliver the service. */
-export const TRANSACTIONAL_TYPES = new Set<string>(NOTIFICATION_TYPES.filter((t) => t !== 'MARKETING' && t !== 'EVENT_REMINDER'));
+export const TRANSACTIONAL_TYPES = new Set<string>(NOTIFICATION_TYPES.filter((t) => t !== 'MARKETING'));
 
 export const LAYOUT = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{subject}}</title></head>

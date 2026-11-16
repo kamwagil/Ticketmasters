@@ -993,6 +993,7 @@ model CustomerBrandRelationship {
   brandId         String    @db.Uuid
   email           String // normalised login email for this brand
   passwordHash    String? // null for guest checkouts
+  tokenVersion    Int       @default(0) // bumped to revoke every issued customer token
   emailVerifiedAt DateTime?
   status          String    @default("ACTIVE")
   orderCount      Int       @default(0)

@@ -21,6 +21,8 @@ export const config = {
   dataEncryptionKey: req('DATA_ENCRYPTION_KEY'),
   queueMode: opt('QUEUE_MODE', 'bullmq') as 'bullmq' | 'inline',
   runWorkers: opt('RUN_WORKERS', 'true') === 'true',
+  /** Namespaces queue keys so several environments can share one Redis. */
+  queuePrefix: opt('QUEUE_PREFIX', 'ctp'),
   accessTokenTtlSec: 15 * 60,
   refreshTokenTtlSec: 12 * 60 * 60,
   customerTokenTtlSec: 7 * 24 * 60 * 60,

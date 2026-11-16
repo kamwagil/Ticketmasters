@@ -96,20 +96,53 @@ export class LedgerService {
 
   /**
    * Splits a refund across the accounts the original capture was booked to.
-   * Each component is refunded pro rata on the cumulative refunded amount, so rounding
-   * never drifts and a full refund reverses every account exactly.
+   *
+   * The refund is shared in proportion to what is still left in each account (original
+   * amount minus what earlier refunds already reversed), using largest-remainder rounding.
+   * That guarantees: every share is >= 0, no account is reversed by more than it holds, the
+   * shares add up to exactly the refund amount, and the final refund clears every account
+   * to zero, however the order was refunded in pieces.
    */
-  refundAllocation(order: Allocation, refundedBeforeMinor: bigint, refundMinor: bigint): Allocation {
-    const after = refundedBeforeMinor + refundMinor;
-    const share = (component: bigint) =>
-      order.totalMinor === 0n ? 0n : (component * after) / order.totalMinor - (component * refundedBeforeMinor) / order.totalMinor;
-    const feesMinor = share(order.feesMinor);
-    const taxMinor = share(order.taxMinor);
-    const platformCommissionMinor = share(order.platformCommissionMinor);
-    const brandCommissionMinor = share(order.brandCommissionMinor);
+  refundAllocation(order: Allocation, alreadyRefunded: Omit<Allocation, 'totalMinor'>, refundMinor: bigint): Allocation {
+    const keys = ['feesMinor', 'taxMinor', 'platformCommissionMinor', 'brandCommissionMinor', 'promoterMinor'] as const;
+    const remaining = keys.map((k) => order[k] - alreadyRefunded[k]);
+    const remainingTotal = remaining.reduce((a, b) => a + b, 0n);
+    if (refundMinor <= 0n || refundMinor > remainingTotal || remaining.some((r) => r < 0n)) {
+      throw new Error(`Refund of ${refundMinor} cannot be allocated against a remaining balance of ${remainingTotal}`);
+    }
+    let shares: bigint[];
+    if (refundMinor === remainingTotal) {
+      shares = remaining;
+    } else {
+      shares = remaining.map((r) => (r * refundMinor) / remainingTotal);
+      let leftover = refundMinor - shares.reduce((a, b) => a + b, 0n);
+      const byFraction = remaining
+        .map((r, i) => ({ i, fraction: (r * refundMinor) % remainingTotal }))
+        .sort((a, b) => (a.fraction === b.fraction ? b.i - a.i : a.fraction > b.fraction ? -1 : 1));
+      for (const { i } of byFraction) {
+        if (leftover === 0n) break;
+        if (shares[i] < remaining[i]) {
+          shares[i] += 1n;
+          leftover -= 1n;
+        }
+      }
+      if (leftover !== 0n) throw new Error('Refund allocation did not converge'); // unreachable: leftover < number of non-zero fractions
+    }
+    const out = Object.fromEntries(keys.map((k, i) => [k, shares[i]])) as Omit<Allocation, 'totalMinor'>;
+    return { totalMinor: refundMinor, ...out };
+  }
+
+  /** What earlier refunds on this order have already reversed, per account, read from the ledger itself. */
+  async refundedSoFar(tx: Tx, orderId: string): Promise<Omit<Allocation, 'totalMinor'>> {
+    const rows = await tx.$queryRaw<{ account: LedgerAccount; amount: bigint }[]>`
+      SELECT e."account", COALESCE(SUM(e."amountMinor"), 0)::bigint AS amount
+        FROM "financial_ledger_entries" e JOIN "ledger_transactions" t ON t."id" = e."transactionId"
+       WHERE t."orderId" = ${orderId}::uuid AND t."type" = 'REFUND' AND e."direction" = 'DEBIT'
+       GROUP BY e."account"`;
+    const of = (account: LedgerAccount) => rows.find((r) => r.account === account)?.amount ?? 0n;
     return {
-      totalMinor: refundMinor, feesMinor, taxMinor, platformCommissionMinor, brandCommissionMinor,
-      promoterMinor: refundMinor - feesMinor - taxMinor - platformCommissionMinor - brandCommissionMinor,
+      feesMinor: of('SERVICE_FEE_REVENUE'), taxMinor: of('TAX_PAYABLE'), platformCommissionMinor: of('PLATFORM_COMMISSION_REVENUE'),
+      brandCommissionMinor: of('BRAND_COMMISSION_PAYABLE'), promoterMinor: of('PROMOTER_PAYABLE'),
     };
   }
 

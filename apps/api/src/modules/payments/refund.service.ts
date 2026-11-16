@@ -172,7 +172,7 @@ export class RefundService {
       const order = await this.orders.lock(tx, refund.orderId);
       const full = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: { event: true, commissions: true } });
       const orderAlloc = await this.payments.orderAllocation(tx, full);
-      const alloc = this.ledger.refundAllocation(orderAlloc, order.refundedMinor, refund.amountMinor);
+      const alloc = this.ledger.refundAllocation(orderAlloc, await this.ledger.refundedSoFar(tx, order.id), refund.amountMinor);
       const organizerId = full.event.organizerId;
 
       await this.ledger.post(tx, {

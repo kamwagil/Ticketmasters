@@ -278,6 +278,8 @@ export interface RateRule {
 export const RateLimit = (rule: RateRule) => SetMetadata(RATE_KEY, rule);
 
 const memoryBuckets = new Map<string, { count: number; resetAt: number }>();
+/** Clears the in-process limiter state (used between automated tests; Redis-backed limits are unaffected). */
+export const clearRateLimitBuckets = () => memoryBuckets.clear();
 
 /** Fixed-window limiter. Redis-backed so limits hold across API replicas. */
 @Injectable()

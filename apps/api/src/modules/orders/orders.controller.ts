@@ -49,6 +49,9 @@ export class OrdersController {
   @Permissions('orders.read')
   async list(@CurrentStaff() staff: Staff, @Query() q: OrderQuery, @Res({ passthrough: true }) res: Response) {
     const term = q.q?.trim();
+    // Only treat the term as a phone number when it looks like one; otherwise the digits inside
+    // an email or reference would match unrelated phone numbers.
+    const phoneDigits = term && /^[\d\s+()-]{5,}$/.test(term) ? term.replace(/[^\d]/g, '') : null;
     const where: Prisma.OrderWhereInput = {
       ...this.scope(staff, q.brandId),
       ...(q.status ? { status: q.status as any } : {}),
@@ -62,7 +65,7 @@ export class OrdersController {
             OR: [
               { reference: { contains: term.toUpperCase() } },
               { customerEmail: { contains: term.toLowerCase() } },
-              { customerPhone: { contains: term.replace(/[^\d+]/g, '') || term } },
+              ...(phoneDigits ? [{ customerPhone: { contains: phoneDigits.replace(/^0/, '') } }] : []),
               { customerName: { contains: term, mode: 'insensitive' } },
               { gatewayReference: { equals: term.toUpperCase() } },
             ],

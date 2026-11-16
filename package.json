@@ -1,0 +1,19 @@
+{
+  "name": "central-ticketing-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:migrate": "npm run db:migrate -w @ctp/api",
+    "db:seed": "npm run db:seed -w @ctp/api",
+    "dev:api": "npm run start:dev -w @ctp/api",
+    "dev:admin": "npm run dev -w @ctp/admin",
+    "dev:storefront": "npm run dev -w @ctp/storefront",
+    "test": "npm test -w @ctp/api",
+    "build": "npm run build -w @ctp/api && npm run build -w @ctp/admin && npm run build -w @ctp/storefront"
+  }
+}

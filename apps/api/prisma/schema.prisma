@@ -1,0 +1,1827 @@
+// Central Ticketing Platform - authoritative data model.
+// Conventions:
+//  * UUID primary keys, snake_case table names, camelCase columns.
+//  * All money is stored as BigInt minor units (cents) next to an ISO-4217 currency code.
+//  * Every tenant-owned record carries brandId. Shared master data (events, venues,
+//    inventory) is brand-neutral and reaches brands through event_brand_publications.
+//  * CHECK constraints, partial unique indexes and ledger immutability triggers live in
+//    the hand-written migration `*_constraints_and_triggers`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  INVITED
+}
+
+enum BrandStatus {
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+}
+
+enum PolicyType {
+  TERMS
+  REFUND
+  PRIVACY
+}
+
+enum EventStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  POSTPONED
+  CANCELLED
+  COMPLETED
+  ARCHIVED
+}
+
+enum TicketCategoryStatus {
+  ACTIVE
+  PAUSED
+  SOLD_OUT
+  CLOSED
+}
+
+enum DeliveryMethod {
+  E_TICKET
+  WILL_CALL
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONFIRMED
+  RELEASED
+  EXPIRED
+}
+
+enum InventoryMovementType {
+  INITIAL
+  ADJUSTMENT
+  RESERVE
+  RELEASE
+  EXPIRE
+  CONFIRM
+  REFUND_RETURN
+  LATE_PAYMENT_ALLOCATION
+}
+
+enum OrderStatus {
+  PENDING
+  RESERVED
+  AWAITING_PAYMENT
+  PAYMENT_PROCESSING
+  PAID
+  TICKETS_ISSUED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  CANCELLED
+  EXPIRED
+  FAILED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PROCESSING
+  PAID
+  FAILED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentState {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+  REJECTED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum LedgerAccount {
+  GATEWAY_CLEARING // asset: funds captured by the gateway, not yet settled to bank
+  BANK // asset: funds settled to the merchant bank account
+  PROMOTER_PAYABLE // liability: owed to event organizers
+  BRAND_COMMISSION_PAYABLE // liability: owed to storefront brands
+  TAX_PAYABLE // liability
+  PLATFORM_COMMISSION_REVENUE
+  SERVICE_FEE_REVENUE
+  GATEWAY_FEE_EXPENSE
+  REFUND_LOSS_EXPENSE // non-recoverable amounts absorbed by the platform
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerTransactionType {
+  PAYMENT_CAPTURE
+  GATEWAY_FEE
+  REFUND
+  SETTLEMENT
+  PAYOUT
+  ADJUSTMENT
+  REVERSAL
+}
+
+enum CommissionType {
+  PLATFORM_COMMISSION // deducted from the promoter's share
+  BRAND_COMMISSION // deducted from the promoter's share, owed to the selling brand
+  SERVICE_FEE // charged to the customer on top of face value
+  TAX // charged to the customer on top of face value + fees
+}
+
+enum PayableStatus {
+  PENDING
+  AVAILABLE
+  IN_PAYOUT
+  PAID
+}
+
+enum PayoutStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PAID
+  REJECTED
+  CANCELLED
+}
+
+enum TicketStatus {
+  VALID
+  USED
+  CANCELLED
+  REFUNDED
+  REVOKED
+  TRANSFERRED
+}
+
+enum ScanResult {
+  ADMITTED
+  ALREADY_USED
+  INVALID_TOKEN
+  WRONG_EVENT
+  NOT_VALID
+  OFFLINE_CONFLICT
+}
+
+enum TransferStatus {
+  PENDING
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+}
+
+enum CustomerStatus {
+  ACTIVE
+  BLOCKED
+  ANONYMIZED
+}
+
+enum IdentityType {
+  EMAIL
+  PHONE
+}
+
+enum Channel {
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum ConsentStatus {
+  GRANTED
+  WITHDRAWN
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  FAILED
+  BOUNCED
+  SKIPPED
+}
+
+enum SupportStatus {
+  OPEN
+  PENDING_CUSTOMER
+  PENDING_INTERNAL
+  RESOLVED
+  CLOSED
+}
+
+enum SupportPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SupportIssueType {
+  GENERAL_ENQUIRY
+  TICKET_DELIVERY
+  PAYMENT
+  REFUND_REQUEST
+  EVENT_CANCELLATION
+  ORDER_ENQUIRY
+}
+
+enum DiscountType {
+  PERCENT
+  FIXED
+}
+
+enum DataRequestType {
+  ACCESS
+  CORRECTION
+  DELETION
+}
+
+enum DataRequestStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// ───────────────────────── Identity & access ─────────────────────────
+
+model User {
+  id               String     @id @default(uuid()) @db.Uuid
+  email            String     @unique
+  fullName         String
+  passwordHash     String
+  status           UserStatus @default(ACTIVE)
+  allBrands        Boolean    @default(false) // platform-wide staff (e.g. Super Admin)
+  mfaEnabled       Boolean    @default(false)
+  mfaSecretEnc     String? // AES-256-GCM encrypted TOTP secret
+  failedLoginCount Int        @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  deletedAt        DateTime?
+
+  roles            UserRole[]
+  brandAssignments UserBrandAssignment[]
+  eventAssignments UserEventAssignment[]
+  sessions         Session[]
+
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique
+  name        String
+  description String?
+  isSystem    Boolean  @default(false) // system roles cannot be deleted, permissions remain editable
+  eventScoped Boolean  @default(false) // holders only see events explicitly assigned to them
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String @id @default(uuid()) @db.Uuid
+  key         String @unique // e.g. "orders.read"
+  group       String
+  description String
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId String @db.Uuid
+  roleId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserBrandAssignment {
+  userId    String   @db.Uuid
+  brandId   String   @db.Uuid
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@id([userId, brandId])
+  @@index([brandId])
+  @@map("user_brand_assignments")
+}
+
+model UserEventAssignment {
+  userId  String @db.Uuid
+  eventId String @db.Uuid
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([userId, eventId])
+  @@map("user_event_assignments")
+}
+
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  refreshTokenHash String    @unique
+  mfaVerified      Boolean   @default(false)
+  ip               String?
+  userAgent        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  lastUsedAt       DateTime  @default(now())
+  createdAt        DateTime  @default(now())
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  actorType     String // USER | CUSTOMER | STOREFRONT | SYSTEM
+  actorId       String?
+  actorLabel    String?
+  brandId       String?  @db.Uuid
+  action        String // e.g. "refund.approve"
+  entityType    String?
+  entityId      String?
+  before        Json?
+  after         Json?
+  metadata      Json?
+  ip            String?
+  correlationId String?
+  createdAt     DateTime @default(now())
+
+  @@index([brandId, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// ───────────────────────── Brand management ─────────────────────────
+
+model LegalEntity {
+  id                 String   @id @default(uuid()) @db.Uuid
+  name               String
+  registrationNumber String?
+  taxNumber          String?
+  country            String
+  address            String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  brands           BrandLegalEntityAssignment[]
+  providerAccounts PaymentProviderAccount[]
+  orders           Order[]
+
+  @@map("legal_entities")
+}
+
+model Brand {
+  id               String      @id @default(uuid()) @db.Uuid
+  slug             String      @unique
+  name             String
+  status           BrandStatus @default(ACTIVE)
+  logoUrl          String?
+  primaryColor     String      @default("#0f172a")
+  secondaryColor   String      @default("#f59e0b")
+  contactEmail     String
+  supportPhone     String?
+  supportUrl       String?
+  businessAddress  String?
+  emailSenderName  String
+  emailSenderAddr  String
+  defaultCurrency  String      @default("KES")
+  currencies       String[]    @default(["KES"])
+  timezone         String      @default("Africa/Nairobi")
+  enabledPaymentMethods String[] @default(["card", "mobile_money"])
+  reservationTtlSeconds Int    @default(900)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  domains          BrandDomain[]
+  apiKeys          StorefrontApiKey[]
+  settings         BrandSetting[]
+  policies         BrandPolicy[]
+  emailTemplates   BrandEmailTemplate[]
+  paymentConfigs   BrandPaymentConfiguration[]
+  legalEntities    BrandLegalEntityAssignment[]
+  staff            UserBrandAssignment[]
+  publications     EventBrandPublication[]
+  orders           Order[]
+  relationships    CustomerBrandRelationship[]
+
+  @@map("brands")
+}
+
+model BrandDomain {
+  id         String    @id @default(uuid()) @db.Uuid
+  brandId    String    @db.Uuid
+  domain     String    @unique // lower-case host, e.g. "tickets.example.com"
+  isPrimary  Boolean   @default(false)
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+  brand      Brand     @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@index([brandId])
+  @@map("brand_domains")
+}
+
+// Server-to-server credential for a storefront. The brand is derived from the key;
+// a brand id sent by a browser is never trusted.
+model StorefrontApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  brandId    String    @db.Uuid
+  label      String
+  keyPrefix  String // first characters, shown in the UI
+  keyHash    String    @unique // sha256 of the full key
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  brand      Brand     @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@index([brandId])
+  @@map("storefront_api_keys")
+}
+
+model BrandSetting {
+  brandId   String   @db.Uuid
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@id([brandId, key])
+  @@map("brand_settings")
+}
+
+model BrandPolicy {
+  id          String     @id @default(uuid()) @db.Uuid
+  brandId     String     @db.Uuid
+  type        PolicyType
+  version     Int
+  content     String
+  publishedAt DateTime   @default(now())
+  createdBy   String?
+  brand       Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, type, version])
+  @@map("brand_policies")
+}
+
+model BrandLegalEntityAssignment {
+  brandId       String      @db.Uuid
+  legalEntityId String      @db.Uuid
+  isDefault     Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+  brand         Brand       @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  legalEntity   LegalEntity @relation(fields: [legalEntityId], references: [id])
+
+  @@id([brandId, legalEntityId])
+  @@map("brand_legal_entity_assignments")
+}
+
+// ───────────────────────── Platform configuration ─────────────────────────
+
+model PaymentProvider {
+  code       String  @id // paystack | flutterwave | sandbox
+  name       String
+  isTestOnly Boolean @default(false) // sandbox provider: never represents real money
+  enabled    Boolean @default(true)
+
+  accounts PaymentProviderAccount[]
+
+  @@map("payment_providers")
+}
+
+// A merchant account held by a specific legal entity with a provider.
+model PaymentProviderAccount {
+  id             String   @id @default(uuid()) @db.Uuid
+  providerCode   String
+  legalEntityId  String   @db.Uuid
+  label          String
+  livemode       Boolean  @default(false)
+  currencies     String[]
+  credentialsEnc String // AES-256-GCM encrypted JSON (secret key, webhook secret, ...)
+  publicKey      String?
+  merchantRef    String? // provider-side merchant/account identifier used for account verification
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  provider    PaymentProvider             @relation(fields: [providerCode], references: [code])
+  legalEntity LegalEntity                 @relation(fields: [legalEntityId], references: [id])
+  brandConfigs BrandPaymentConfiguration[]
+  payments    Payment[]
+  settlements GatewaySettlement[]
+
+  @@index([providerCode])
+  @@map("payment_provider_accounts")
+}
+
+// Which merchant account a brand uses for which currencies. An order's legal seller
+// is the legal entity that owns the selected account.
+model BrandPaymentConfiguration {
+  id                String   @id @default(uuid()) @db.Uuid
+  brandId           String   @db.Uuid
+  providerAccountId String   @db.Uuid
+  currencies        String[]
+  priority          Int      @default(100) // lower wins when several configs match a currency
+  active            Boolean  @default(true)
+  providerApproved  Boolean  @default(false) // operator attests the provider approved this brand/domain on the account
+  approvalNote      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  brand           Brand                  @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  providerAccount PaymentProviderAccount @relation(fields: [providerAccountId], references: [id])
+
+  @@unique([brandId, providerAccountId])
+  @@map("brand_payment_configurations")
+}
+
+model Currency {
+  code       String  @id
+  name       String
+  minorUnits Int     @default(2)
+  enabled    Boolean @default(true)
+
+  @@map("currencies")
+}
+
+model ExchangeRate {
+  id        String   @id @default(uuid()) @db.Uuid
+  base      String
+  quote     String
+  rate      Decimal  @db.Decimal(20, 10)
+  source    String   @default("manual")
+  asOf      DateTime
+  createdAt DateTime @default(now())
+
+  @@index([base, quote, asOf])
+  @@map("exchange_rates")
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("system_settings")
+}
+
+model IntegrationLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  integration   String // paystack | flutterwave | smtp | sms | whatsapp | storage
+  direction     String // OUTBOUND | INBOUND
+  operation     String
+  status        String // OK | ERROR
+  httpStatus    Int?
+  durationMs    Int?
+  brandId       String?  @db.Uuid
+  reference     String?
+  error         String?
+  metadata      Json?
+  correlationId String?
+  createdAt     DateTime @default(now())
+
+  @@index([integration, createdAt])
+  @@index([status, createdAt])
+  @@map("integration_logs")
+}
+
+model Alert {
+  id          String        @id @default(uuid()) @db.Uuid
+  type        String // e.g. INVENTORY_INCONSISTENCY, WEBHOOK_BACKLOG
+  severity    AlertSeverity
+  message     String
+  brandId     String?       @db.Uuid
+  entityType  String?
+  entityId    String?
+  metadata    Json?
+  dedupeKey   String?       @unique
+  resolvedAt  DateTime?
+  resolvedBy  String?
+  createdAt   DateTime      @default(now())
+
+  @@index([resolvedAt, createdAt])
+  @@map("alerts")
+}
+
+model IdempotencyKey {
+  id             String   @id @default(uuid()) @db.Uuid
+  scope          String // e.g. "storefront:<brandId>:checkout"
+  key            String
+  requestHash    String
+  responseStatus Int?
+  responseBody   Json?
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+
+  @@unique([scope, key])
+  @@index([createdAt])
+  @@map("idempotency_keys")
+}
+
+// ───────────────────────── Event management ─────────────────────────
+
+model EventCategory {
+  id     String  @id @default(uuid()) @db.Uuid
+  slug   String  @unique
+  name   String
+  events Event[]
+
+  @@map("event_categories")
+}
+
+model Venue {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String
+  address   String?
+  city      String
+  country   String
+  capacity  Int?
+  timezone  String    @default("Africa/Nairobi")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  events    Event[]
+
+  @@map("venues")
+}
+
+model Performer {
+  id        String           @id @default(uuid()) @db.Uuid
+  name      String
+  type      String           @default("ARTIST") // ARTIST | TEAM | SPEAKER
+  bio       String?
+  imageUrl  String?
+  createdAt DateTime         @default(now())
+  events    EventPerformer[]
+
+  @@map("performers")
+}
+
+model EventPerformer {
+  eventId     String    @db.Uuid
+  performerId String    @db.Uuid
+  billing     Int       @default(0)
+  event       Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, performerId])
+  @@map("event_performers")
+}
+
+// Seller / promoter.
+model Organizer {
+  id                 String   @id @default(uuid()) @db.Uuid
+  name               String
+  legalName          String?
+  registrationNumber String?
+  taxNumber          String?
+  contactEmail       String
+  contactPhone       String?
+  country            String?
+  verificationStatus String   @default("PENDING") // PENDING | VERIFIED | REJECTED
+  agreementNotes     String?
+  settlementCurrency String   @default("KES")
+  settlementDetailsEnc String? // encrypted bank / mobile money details
+  payoutHoldDays     Int      @default(3) // days after event end before payables become available
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  events   Event[]
+  payables PromoterPayable[]
+  payouts  Payout[]
+
+  @@map("organizers")
+}
+
+model Event {
+  id           String      @id @default(uuid()) @db.Uuid
+  slug         String      @unique
+  name         String
+  description  String      @default("")
+  categoryId   String?     @db.Uuid
+  venueId      String?     @db.Uuid
+  organizerId  String?     @db.Uuid
+  ownerBrandId String?     @db.Uuid // null = platform-managed master event
+  posterUrl    String?
+  startsAt     DateTime
+  endsAt       DateTime?
+  doorsAt      DateTime?
+  timezone     String      @default("Africa/Nairobi")
+  status       EventStatus @default(DRAFT)
+  publishAt    DateTime? // scheduled publication
+  policies     String?
+  cancelledAt  DateTime?
+  cancelReason String?
+  createdBy    String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  category         EventCategory?          @relation(fields: [categoryId], references: [id])
+  venue            Venue?                  @relation(fields: [venueId], references: [id])
+  organizer        Organizer?              @relation(fields: [organizerId], references: [id])
+  performers       EventPerformer[]
+  images           EventImage[]
+  publications     EventBrandPublication[]
+  ticketCategories TicketCategory[]
+  orders           Order[]
+  tickets          Ticket[]
+  staff            UserEventAssignment[]
+
+  @@index([status, startsAt])
+  @@index([organizerId])
+  @@index([ownerBrandId])
+  @@map("events")
+}
+
+model EventImage {
+  id        String   @id @default(uuid()) @db.Uuid
+  eventId   String   @db.Uuid
+  brandId   String?  @db.Uuid // set for brand-specific promotional images
+  url       String
+  kind      String   @default("GALLERY") // POSTER | GALLERY | PROMO
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@map("event_images")
+}
+
+// Publishes one master event to one storefront with brand-specific presentation.
+model EventBrandPublication {
+  id            String    @id @default(uuid()) @db.Uuid
+  eventId       String    @db.Uuid
+  brandId       String    @db.Uuid
+  visible       Boolean   @default(true)
+  featured      Boolean   @default(false)
+  customTitle   String?
+  customDescription String?
+  promoImageUrl String?
+  salesStartAt  DateTime?
+  salesEndAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  event          Event                      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  brand          Brand                      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  priceOverrides PublicationPriceOverride[]
+
+  @@unique([eventId, brandId])
+  @@index([brandId, visible])
+  @@map("event_brand_publications")
+}
+
+model PublicationPriceOverride {
+  publicationId    String                @db.Uuid
+  ticketCategoryId String                @db.Uuid
+  priceMinor       BigInt
+  publication      EventBrandPublication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  ticketCategory   TicketCategory        @relation(fields: [ticketCategoryId], references: [id], onDelete: Cascade)
+
+  @@id([publicationId, ticketCategoryId])
+  @@map("publication_price_overrides")
+}
+
+// ───────────────────────── Inventory ─────────────────────────
+
+model TicketCategory {
+  id             String               @id @default(uuid()) @db.Uuid
+  eventId        String               @db.Uuid
+  name           String // General Admission, VIP, ...
+  description    String?
+  priceMinor     BigInt
+  currency       String
+  salesStartAt   DateTime?
+  salesEndAt     DateTime?
+  minPerOrder    Int                  @default(1)
+  maxPerOrder    Int                  @default(10)
+  deliveryMethod DeliveryMethod       @default(E_TICKET)
+  status         TicketCategoryStatus @default(ACTIVE)
+  sortOrder      Int                  @default(0)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  event          Event                      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  inventory      TicketInventory?
+  reservations   InventoryReservation[]
+  movements      InventoryMovement[]
+  orderItems     OrderItem[]
+  tickets        Ticket[]
+  priceOverrides PublicationPriceOverride[]
+
+  @@index([eventId])
+  @@map("ticket_categories")
+}
+
+// The single authoritative counter row per ticket category, shared by every storefront.
+// CHECK (sold >= 0 AND reserved >= 0 AND sold + reserved <= total) is enforced in SQL.
+model TicketInventory {
+  ticketCategoryId String         @id @db.Uuid
+  total            Int
+  sold             Int            @default(0)
+  reserved         Int            @default(0)
+  updatedAt        DateTime       @updatedAt
+  ticketCategory   TicketCategory @relation(fields: [ticketCategoryId], references: [id], onDelete: Cascade)
+
+  @@map("ticket_inventory")
+}
+
+model InventoryReservation {
+  id               String            @id @default(uuid()) @db.Uuid
+  ticketCategoryId String            @db.Uuid
+  orderId          String            @db.Uuid
+  brandId          String            @db.Uuid
+  quantity         Int
+  status           ReservationStatus @default(ACTIVE)
+  expiresAt        DateTime
+  createdAt        DateTime          @default(now())
+  resolvedAt       DateTime?
+
+  ticketCategory TicketCategory @relation(fields: [ticketCategoryId], references: [id])
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status, expiresAt])
+  @@index([orderId])
+  @@index([ticketCategoryId, status])
+  @@map("inventory_reservations")
+}
+
+// Append-only ledger of every change to ticket_inventory.
+model InventoryMovement {
+  id               String                @id @default(uuid()) @db.Uuid
+  ticketCategoryId String                @db.Uuid
+  type             InventoryMovementType
+  quantity         Int // always positive; the type gives the meaning
+  deltaTotal       Int                   @default(0)
+  deltaSold        Int                   @default(0)
+  deltaReserved    Int                   @default(0)
+  orderId          String?               @db.Uuid
+  brandId          String?               @db.Uuid
+  actorId          String?
+  note             String?
+  createdAt        DateTime              @default(now())
+
+  ticketCategory TicketCategory @relation(fields: [ticketCategoryId], references: [id], onDelete: Cascade)
+
+  @@index([ticketCategoryId, createdAt])
+  @@index([orderId])
+  @@map("inventory_movements")
+}
+
+// ───────────────────────── Customers & CRM ─────────────────────────
+
+// Central person record. One customer can have relationships with many brands.
+model Customer {
+  id                String         @id @default(uuid()) @db.Uuid
+  fullName          String
+  email             String? // primary contact email (not a login credential)
+  phone             String?
+  country           String?
+  city              String?
+  preferredCurrency String?
+  status            CustomerStatus @default(ACTIVE)
+  mergedIntoId      String?        @db.Uuid // set when this record was merged after verification
+  anonymizedAt      DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  identities    CustomerIdentity[]
+  relationships CustomerBrandRelationship[]
+  preferences   CustomerPreference[]
+  consents      MarketingConsent[]
+  tags          CustomerTagAssignment[]
+  notes         CustomerNote[]
+  orders        Order[]
+  tickets       Ticket[]
+
+  @@index([email])
+  @@index([phone])
+  @@map("customers")
+}
+
+// A verified contact point proving who a customer is. Only verified identities link
+// accounts across brands; a partial unique index guarantees one owner per verified value.
+model CustomerIdentity {
+  id                 String       @id @default(uuid()) @db.Uuid
+  customerId         String       @db.Uuid
+  type               IdentityType
+  value              String // normalised (lower-case email / E.164 phone)
+  verifiedAt         DateTime?
+  verifiedViaBrandId String?      @db.Uuid
+  createdAt          DateTime     @default(now())
+  customer           Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, type, value])
+  @@index([type, value])
+  @@map("customer_identities")
+}
+
+// The customer's account with one brand: login credential, status and brand-level stats.
+model CustomerBrandRelationship {
+  id              String    @id @default(uuid()) @db.Uuid
+  customerId      String    @db.Uuid
+  brandId         String    @db.Uuid
+  email           String // normalised login email for this brand
+  passwordHash    String? // null for guest checkouts
+  emailVerifiedAt DateTime?
+  status          String    @default("ACTIVE")
+  orderCount      Int       @default(0)
+  firstOrderAt    DateTime?
+  lastOrderAt     DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  brand    Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, email])
+  @@unique([brandId, customerId])
+  @@index([customerId])
+  @@map("customer_brand_relationships")
+}
+
+model CustomerToken {
+  id             String    @id @default(uuid()) @db.Uuid
+  relationshipId String    @db.Uuid
+  purpose        String // EMAIL_VERIFY | PASSWORD_RESET
+  tokenHash      String    @unique
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([relationshipId])
+  @@map("customer_tokens")
+}
+
+// Communication preferences, scoped per brand.
+model CustomerPreference {
+  customerId String   @db.Uuid
+  brandId    String   @db.Uuid
+  key        String // e.g. "event_reminders", "language"
+  value      Json
+  updatedAt  DateTime @updatedAt
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, brandId, key])
+  @@map("customer_preferences")
+}
+
+// Append-only consent record. The latest row per (customer, brand, channel) is the current state.
+// Consent given to one brand never implies consent to another.
+model MarketingConsent {
+  id          String        @id @default(uuid()) @db.Uuid
+  customerId  String        @db.Uuid
+  brandId     String        @db.Uuid
+  channel     Channel
+  status      ConsentStatus
+  source      String // checkout | account | unsubscribe_link | admin | import
+  lawfulBasis String        @default("consent")
+  wording     String? // the consent text shown to the customer
+  ip          String?
+  createdAt   DateTime      @default(now())
+  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, brandId, channel, createdAt])
+  @@index([brandId, channel, status])
+  @@map("marketing_consents")
+}
+
+model CustomerTag {
+  id          String                  @id @default(uuid()) @db.Uuid
+  brandId     String                  @db.Uuid
+  name        String
+  color       String                  @default("#64748b")
+  createdAt   DateTime                @default(now())
+  assignments CustomerTagAssignment[]
+
+  @@unique([brandId, name])
+  @@map("customer_tags")
+}
+
+model CustomerTagAssignment {
+  customerId String      @db.Uuid
+  tagId      String      @db.Uuid
+  createdAt  DateTime    @default(now())
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag        CustomerTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, tagId])
+  @@map("customer_tag_assignments")
+}
+
+model CustomerNote {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @db.Uuid
+  brandId    String   @db.Uuid
+  authorId   String   @db.Uuid
+  authorName String
+  body       String
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, brandId])
+  @@map("customer_notes")
+}
+
+model CustomerSegment {
+  id          String   @id @default(uuid()) @db.Uuid
+  brandId     String   @db.Uuid // segments are always evaluated within one brand
+  name        String
+  description String?
+  rules       Json // SegmentRules, see customers/segments.ts
+  lastCount   Int?
+  lastEvaluatedAt DateTime?
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([brandId])
+  @@map("customer_segments")
+}
+
+model DataSubjectRequest {
+  id          String            @id @default(uuid()) @db.Uuid
+  customerId  String            @db.Uuid
+  brandId     String            @db.Uuid
+  type        DataRequestType
+  status      DataRequestStatus @default(OPEN)
+  details     String?
+  resolution  String?
+  handledBy   String?
+  dueAt       DateTime
+  createdAt   DateTime          @default(now())
+  completedAt DateTime?
+
+  @@index([brandId, status])
+  @@map("data_subject_requests")
+}
+
+// ───────────────────────── Orders ─────────────────────────
+
+model Order {
+  id                   String        @id @default(uuid()) @db.Uuid
+  reference            String        @unique
+  brandId              String        @db.Uuid
+  sourceDomain         String
+  legalEntityId        String        @db.Uuid // legal seller / merchant of record
+  customerId           String        @db.Uuid
+  relationshipId       String?       @db.Uuid
+  eventId              String        @db.Uuid
+  currency             String
+  subtotalMinor        BigInt
+  feesMinor            BigInt        @default(0)
+  taxMinor             BigInt        @default(0)
+  discountMinor        BigInt        @default(0)
+  totalMinor           BigInt
+  refundedMinor        BigInt        @default(0)
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(UNPAID)
+  gatewayCode          String?
+  gatewayReference     String?
+  customerName         String
+  customerEmail        String
+  customerPhone        String?
+  customerCountry      String?
+  policyVersions       Json // { terms: 3, refund: 2, privacy: 1 } as accepted at checkout
+  promoCodeId          String?       @db.Uuid
+  campaignId           String?       @db.Uuid
+  livemode             Boolean       @default(false)
+  needsAttention       Boolean       @default(false)
+  attentionReason      String?
+  reservationExpiresAt DateTime?
+  paidAt               DateTime?
+  ticketsIssuedAt      DateTime?
+  cancelledAt          DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  brand        Brand                  @relation(fields: [brandId], references: [id])
+  legalEntity  LegalEntity            @relation(fields: [legalEntityId], references: [id])
+  customer     Customer               @relation(fields: [customerId], references: [id])
+  event        Event                  @relation(fields: [eventId], references: [id])
+  items        OrderItem[]
+  history      OrderStatusHistory[]
+  payments     Payment[]
+  refunds      Refund[]
+  tickets      Ticket[]
+  reservations InventoryReservation[]
+  commissions  Commission[]
+
+  @@index([brandId, createdAt])
+  @@index([brandId, status])
+  @@index([customerId])
+  @@index([eventId, status])
+  @@index([customerEmail])
+  @@index([customerPhone])
+  @@index([status, reservationExpiresAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id               String @id @default(uuid()) @db.Uuid
+  orderId          String @db.Uuid
+  ticketCategoryId String @db.Uuid
+  categoryName     String // snapshot
+  quantity         Int
+  unitPriceMinor   BigInt
+  lineTotalMinor   BigInt
+
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  ticketCategory TicketCategory @relation(fields: [ticketCategoryId], references: [id])
+
+  @@index([orderId])
+  @@index([ticketCategoryId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id         String       @id @default(uuid()) @db.Uuid
+  orderId    String       @db.Uuid
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  reason     String?
+  actorType  String // SYSTEM | USER | CUSTOMER | GATEWAY
+  actorId    String?
+  metadata   Json?
+  createdAt  DateTime     @default(now())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+model PromoCode {
+  id             String       @id @default(uuid()) @db.Uuid
+  brandId        String       @db.Uuid
+  code           String // upper-case
+  description    String?
+  discountType   DiscountType
+  percentBps     Int? // 1000 = 10%
+  amountMinor    BigInt?
+  currency       String?
+  eventId        String?      @db.Uuid
+  campaignId     String?      @db.Uuid
+  maxRedemptions Int?
+  redeemedCount  Int          @default(0)
+  minOrderMinor  BigInt?
+  startsAt       DateTime?
+  endsAt         DateTime?
+  active         Boolean      @default(true)
+  createdBy      String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([brandId, code])
+  @@map("promo_codes")
+}
+
+// ───────────────────────── Payments & finance ─────────────────────────
+
+model Payment {
+  id                    String       @id @default(uuid()) @db.Uuid
+  orderId               String       @db.Uuid
+  brandId               String       @db.Uuid
+  providerAccountId     String       @db.Uuid
+  providerCode          String
+  reference             String       @unique // our reference handed to the gateway
+  providerTransactionId String?
+  amountMinor           BigInt
+  currency              String
+  status                PaymentState @default(INITIATED)
+  channel               String? // card | mobile_money | bank_transfer ...
+  gatewayFeeMinor       BigInt?
+  netSettlementMinor    BigInt?
+  checkoutUrl           String?
+  failureReason         String?
+  livemode              Boolean      @default(false)
+  paidAt                DateTime?
+  settlementId          String?      @db.Uuid
+  verification          Json? // sanitized provider verification response
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  order           Order                  @relation(fields: [orderId], references: [id])
+  providerAccount PaymentProviderAccount @relation(fields: [providerAccountId], references: [id])
+  settlement      GatewaySettlement?     @relation(fields: [settlementId], references: [id])
+  attempts        PaymentAttempt[]
+  refunds         Refund[]
+
+  @@unique([providerCode, providerTransactionId])
+  @@index([orderId])
+  @@index([brandId, createdAt])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model PaymentAttempt {
+  id        String   @id @default(uuid()) @db.Uuid
+  paymentId String   @db.Uuid
+  kind      String // INITIALIZE | VERIFY | WEBHOOK | REFUND
+  outcome   String // OK | ERROR | MISMATCH
+  detail    Json?
+  createdAt DateTime @default(now())
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId, createdAt])
+  @@map("payment_attempts")
+}
+
+model PaymentWebhookEvent {
+  id                String             @id @default(uuid()) @db.Uuid
+  providerCode      String
+  providerAccountId String?            @db.Uuid
+  eventKey          String // provider event id, or a hash of type+reference+status
+  eventType         String
+  reference         String?
+  signatureValid    Boolean
+  status            WebhookEventStatus @default(RECEIVED)
+  attempts          Int                @default(0)
+  error             String?
+  payload           Json
+  receivedAt        DateTime           @default(now())
+  processedAt       DateTime?
+
+  @@unique([providerCode, eventKey])
+  @@index([status, receivedAt])
+  @@index([reference])
+  @@map("payment_webhook_events")
+}
+
+model Refund {
+  id               String       @id @default(uuid()) @db.Uuid
+  reference        String       @unique
+  orderId          String       @db.Uuid
+  paymentId        String       @db.Uuid
+  brandId          String       @db.Uuid
+  amountMinor      BigInt
+  currency         String
+  reason           String
+  ticketIds        String[] // tickets revoked when the refund succeeds
+  returnInventory  Boolean      @default(true)
+  status           RefundStatus @default(REQUESTED)
+  requestedByType  String // USER | CUSTOMER | SYSTEM
+  requestedById    String?
+  approvedById     String?
+  rejectedReason   String?
+  providerRefundId String?
+  failureReason    String?
+  idempotencyKey   String       @unique
+  requestedAt      DateTime     @default(now())
+  decidedAt        DateTime?
+  processedAt      DateTime?
+  updatedAt        DateTime     @updatedAt
+
+  order   Order   @relation(fields: [orderId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  @@index([orderId])
+  @@index([brandId, status])
+  @@map("refunds")
+}
+
+// Journal header. Lines live in financial_ledger_entries and must balance per currency.
+model LedgerTransaction {
+  id             String                @id @default(uuid()) @db.Uuid
+  type           LedgerTransactionType
+  description    String
+  brandId        String?               @db.Uuid
+  orderId        String?               @db.Uuid
+  paymentId      String?               @db.Uuid
+  refundId       String?               @db.Uuid
+  payoutId       String?               @db.Uuid
+  settlementId   String?               @db.Uuid
+  reversesId     String?               @db.Uuid
+  idempotencyKey String                @unique // guarantees a business event is journaled once
+  createdBy      String?
+  createdAt      DateTime              @default(now())
+
+  entries FinancialLedgerEntry[]
+
+  @@index([orderId])
+  @@index([brandId, createdAt])
+  @@index([type, createdAt])
+  @@map("ledger_transactions")
+}
+
+// Immutable (UPDATE/DELETE blocked by trigger). Corrections are new reversing entries.
+model FinancialLedgerEntry {
+  id            String          @id @default(uuid()) @db.Uuid
+  transactionId String          @db.Uuid
+  account       LedgerAccount
+  direction     LedgerDirection
+  amountMinor   BigInt
+  currency      String
+  brandId       String?         @db.Uuid
+  legalEntityId String?         @db.Uuid
+  organizerId   String?         @db.Uuid
+  orderId       String?         @db.Uuid
+  createdAt     DateTime        @default(now())
+
+  transaction LedgerTransaction @relation(fields: [transactionId], references: [id])
+
+  @@index([transactionId])
+  @@index([account, currency])
+  @@index([brandId, account, currency])
+  @@index([organizerId, account])
+  @@index([orderId])
+  @@map("financial_ledger_entries")
+}
+
+model GatewaySettlement {
+  id                   String   @id @default(uuid()) @db.Uuid
+  providerAccountId    String   @db.Uuid
+  providerSettlementId String
+  currency             String
+  grossMinor           BigInt
+  feesMinor            BigInt
+  netMinor             BigInt
+  settledAt            DateTime
+  status               String   @default("RECEIVED") // RECEIVED | RECONCILED | DISCREPANCY
+  note                 String?
+  raw                  Json?
+  createdBy            String?
+  createdAt            DateTime @default(now())
+
+  providerAccount PaymentProviderAccount @relation(fields: [providerAccountId], references: [id])
+  payments        Payment[]
+
+  @@unique([providerAccountId, providerSettlementId])
+  @@map("gateway_settlements")
+}
+
+model ReconciliationRun {
+  id          String   @id @default(uuid()) @db.Uuid
+  brandId     String?  @db.Uuid
+  periodStart DateTime
+  periodEnd   DateTime
+  summary     Json
+  issueCount  Int
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("reconciliation_runs")
+}
+
+// Commercial agreement. The most specific active rule per type wins:
+// event > organizer > brand > platform default.
+model CommissionRule {
+  id          String         @id @default(uuid()) @db.Uuid
+  name        String
+  type        CommissionType
+  brandId     String?        @db.Uuid
+  organizerId String?        @db.Uuid
+  eventId     String?        @db.Uuid
+  percentBps  Int            @default(0) // 250 = 2.5%
+  fixedMinor  BigInt         @default(0) // per ticket
+  currency    String? // required when fixedMinor > 0
+  active      Boolean        @default(true)
+  createdBy   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([type, active])
+  @@map("commission_rules")
+}
+
+// The allocation actually applied to an order (snapshot of the rule at checkout).
+model Commission {
+  id          String         @id @default(uuid()) @db.Uuid
+  orderId     String         @db.Uuid
+  brandId     String         @db.Uuid
+  ruleId      String?        @db.Uuid
+  type        CommissionType
+  baseMinor   BigInt
+  percentBps  Int
+  fixedMinor  BigInt
+  amountMinor BigInt
+  currency    String
+  createdAt   DateTime       @default(now())
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("commissions")
+}
+
+// Signed accrual lines per organizer. Positive = owed to promoter, negative = refund reversal.
+model PromoterPayable {
+  id          String        @id @default(uuid()) @db.Uuid
+  organizerId String        @db.Uuid
+  eventId     String        @db.Uuid
+  orderId     String        @db.Uuid
+  brandId     String        @db.Uuid
+  refundId    String?       @db.Uuid
+  kind        String // SALE | REFUND
+  grossMinor  BigInt // ticket face value (signed)
+  commissionMinor BigInt // platform + brand commission withheld (signed)
+  amountMinor BigInt // net payable (signed)
+  currency    String
+  status      PayableStatus @default(PENDING)
+  availableAt DateTime?
+  payoutId    String?       @db.Uuid
+  createdAt   DateTime      @default(now())
+
+  organizer Organizer @relation(fields: [organizerId], references: [id])
+  payout    Payout?   @relation(fields: [payoutId], references: [id])
+
+  @@index([organizerId, status, currency])
+  @@index([orderId])
+  @@index([eventId])
+  @@map("promoter_payables")
+}
+
+model Payout {
+  id               String       @id @default(uuid()) @db.Uuid
+  reference        String       @unique
+  organizerId      String       @db.Uuid
+  currency         String
+  amountMinor      BigInt
+  status           PayoutStatus @default(DRAFT)
+  createdById      String
+  approvedById     String?
+  paidById         String?
+  paymentReference String? // bank / mobile money reference entered when marked paid
+  note             String?
+  createdAt        DateTime     @default(now())
+  approvedAt       DateTime?
+  paidAt           DateTime?
+  updatedAt        DateTime     @updatedAt
+
+  organizer Organizer         @relation(fields: [organizerId], references: [id])
+  payables  PromoterPayable[]
+
+  @@index([organizerId, status])
+  @@map("payouts")
+}
+
+// ───────────────────────── Ticketing ─────────────────────────
+
+model Ticket {
+  id               String       @id @default(uuid()) @db.Uuid
+  reference        String       @unique // human readable, printed on the ticket
+  orderId          String       @db.Uuid
+  orderItemId      String       @db.Uuid
+  eventId          String       @db.Uuid
+  ticketCategoryId String       @db.Uuid
+  brandId          String       @db.Uuid
+  customerId       String       @db.Uuid
+  holderName       String?
+  holderEmail      String?
+  status           TicketStatus @default(VALID)
+  issuedAt         DateTime     @default(now())
+  usedAt           DateTime?
+  updatedAt        DateTime     @updatedAt
+
+  order          Order                 @relation(fields: [orderId], references: [id])
+  event          Event                 @relation(fields: [eventId], references: [id])
+  ticketCategory TicketCategory        @relation(fields: [ticketCategoryId], references: [id])
+  customer       Customer              @relation(fields: [customerId], references: [id])
+  qrTokens       TicketQrToken[]
+  scans          TicketScan[]
+  transfers      TicketTransfer[]
+  history        TicketStatusHistory[]
+
+  @@index([orderId])
+  @@index([eventId, status])
+  @@index([customerId])
+  @@index([brandId, issuedAt])
+  @@map("tickets")
+}
+
+// The QR encodes a random 256-bit token. Only its SHA-256 hash is stored; the plaintext is
+// kept AES-encrypted so the ticket can be re-rendered, and rotated on transfer.
+model TicketQrToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  ticketId  String    @db.Uuid
+  tokenHash String    @unique
+  tokenEnc  String
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+  ticket    Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, active])
+  @@map("ticket_qr_tokens")
+}
+
+model TicketScan {
+  id          String     @id @default(uuid()) @db.Uuid
+  ticketId    String?    @db.Uuid // null when the token did not resolve
+  eventId     String     @db.Uuid // the event the scanner was scanning for
+  result      ScanResult
+  scannedById String     @db.Uuid
+  deviceId    String?
+  gate        String?
+  offline     Boolean    @default(false)
+  scannedAt   DateTime // device time for offline scans, server time otherwise
+  receivedAt  DateTime   @default(now())
+  clientScanId String?   @unique // idempotency for offline sync
+  ticket      Ticket?    @relation(fields: [ticketId], references: [id])
+
+  @@index([eventId, receivedAt])
+  @@index([ticketId])
+  @@index([scannedById, receivedAt])
+  @@map("ticket_scans")
+}
+
+model TicketTransfer {
+  id             String         @id @default(uuid()) @db.Uuid
+  ticketId       String         @db.Uuid
+  brandId        String         @db.Uuid
+  fromCustomerId String         @db.Uuid
+  toEmail        String
+  toName         String?
+  toCustomerId   String?        @db.Uuid
+  status         TransferStatus @default(PENDING)
+  claimTokenHash String         @unique
+  expiresAt      DateTime
+  createdAt      DateTime       @default(now())
+  completedAt    DateTime?
+  ticket         Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@map("ticket_transfers")
+}
+
+model TicketStatusHistory {
+  id         String        @id @default(uuid()) @db.Uuid
+  ticketId   String        @db.Uuid
+  fromStatus TicketStatus?
+  toStatus   TicketStatus
+  reason     String?
+  actorType  String
+  actorId    String?
+  createdAt  DateTime      @default(now())
+  ticket     Ticket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("ticket_status_history")
+}
+
+// ───────────────────────── Communications ─────────────────────────
+
+// Platform default template per notification type and channel.
+model EmailTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  type      String // ORDER_CONFIRMATION, TICKET_DELIVERY, ...
+  channel   Channel  @default(EMAIL)
+  subject   String
+  bodyHtml  String // Handlebars-style {{variables}}
+  bodyText  String?
+  updatedAt DateTime @updatedAt
+
+  @@unique([type, channel])
+  @@map("email_templates")
+}
+
+// Brand-specific override of a template.
+model BrandEmailTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  brandId   String   @db.Uuid
+  type      String
+  channel   Channel  @default(EMAIL)
+  subject   String
+  bodyHtml  String
+  bodyText  String?
+  active    Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, type, channel])
+  @@map("brand_email_templates")
+}
+
+// Transactional outbox: written in the same DB transaction as the business change,
+// delivered asynchronously by the queue worker with retries.
+model EmailJob {
+  id            String         @id @default(uuid()) @db.Uuid
+  brandId       String         @db.Uuid
+  channel       Channel        @default(EMAIL)
+  type          String
+  toAddress     String
+  toName        String?
+  customerId    String?        @db.Uuid
+  orderId       String?        @db.Uuid
+  campaignId    String?        @db.Uuid
+  payload       Json // template variables
+  attachTickets Boolean        @default(false)
+  dedupeKey     String?        @unique
+  status        DeliveryStatus @default(QUEUED)
+  attempts      Int            @default(0)
+  maxAttempts   Int            @default(6)
+  nextAttemptAt DateTime       @default(now())
+  lastError     String?
+  providerMessageId String?
+  createdAt     DateTime       @default(now())
+  sentAt        DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([brandId, createdAt])
+  @@index([orderId])
+  @@index([customerId])
+  @@map("email_jobs")
+}
+
+// One row per delivery attempt / delivery event, across all channels.
+model NotificationLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  jobId      String?  @db.Uuid
+  brandId    String   @db.Uuid
+  customerId String?  @db.Uuid
+  channel    Channel
+  type       String
+  toAddress  String
+  subject    String?
+  event      String // ATTEMPT | SENT | DELIVERED | FAILED | BOUNCED | OPENED | CLICKED | SKIPPED
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([brandId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([jobId])
+  @@map("notification_logs")
+}
+
+model Campaign {
+  id           String         @id @default(uuid()) @db.Uuid
+  brandId      String         @db.Uuid // the sending brand; audiences never cross brands implicitly
+  name         String
+  channel      Channel        @default(EMAIL)
+  subject      String?
+  bodyHtml     String
+  status       CampaignStatus @default(DRAFT)
+  scheduledAt  DateTime?
+  sentAt       DateTime?
+  createdBy    String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  audiences  CampaignAudience[]
+  deliveries CampaignDelivery[]
+
+  @@index([brandId, status])
+  @@index([status, scheduledAt])
+  @@map("campaigns")
+}
+
+model CampaignAudience {
+  campaignId String   @db.Uuid
+  segmentId  String   @db.Uuid
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@id([campaignId, segmentId])
+  @@map("campaign_audiences")
+}
+
+model CampaignDelivery {
+  id             String         @id @default(uuid()) @db.Uuid
+  campaignId     String         @db.Uuid
+  customerId     String         @db.Uuid
+  toAddress      String
+  status         DeliveryStatus @default(QUEUED)
+  trackingToken  String         @unique
+  skippedReason  String?
+  sentAt         DateTime?
+  openedAt       DateTime?
+  clickedAt      DateTime?
+  clickCount     Int            @default(0)
+  unsubscribedAt DateTime?
+  createdAt      DateTime       @default(now())
+  campaign       Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, customerId])
+  @@index([campaignId, status])
+  @@map("campaign_deliveries")
+}
+
+// ───────────────────────── Customer support ─────────────────────────
+
+model SupportTicket {
+  id           String           @id @default(uuid()) @db.Uuid
+  reference    String           @unique
+  brandId      String           @db.Uuid
+  customerId   String?          @db.Uuid
+  orderId      String?          @db.Uuid
+  contactEmail String
+  contactName  String?
+  issueType    SupportIssueType @default(GENERAL_ENQUIRY)
+  priority     SupportPriority  @default(NORMAL)
+  status       SupportStatus    @default(OPEN)
+  subject      String
+  assignedToId String?          @db.Uuid
+  refundId     String?          @db.Uuid
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  resolvedAt   DateTime?
+
+  messages SupportMessage[]
+
+  @@index([brandId, status])
+  @@index([assignedToId, status])
+  @@index([customerId])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id         String        @id @default(uuid()) @db.Uuid
+  ticketId   String        @db.Uuid
+  authorType String // CUSTOMER | STAFF | SYSTEM
+  authorId   String?
+  authorName String?
+  body       String
+  internal   Boolean       @default(false) // internal notes are never shown to the customer
+  createdAt  DateTime      @default(now())
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
+}
+
+// ───────────────────────── Sandbox gateway (test-only) ─────────────────────────
+// State of the built-in sandbox payment provider. It stands in for an external gateway's
+// own database during development and automated tests and never represents real money.
+model SandboxGatewayTransaction {
+  reference         String   @id
+  transactionId     String   @unique
+  providerAccountId String   @db.Uuid
+  amountMinor       BigInt
+  currency          String
+  email             String
+  callbackUrl       String
+  status            String   @default("pending") // pending | success | failed
+  refundedMinor     BigInt   @default(0)
+  createdAt         DateTime @default(now())
+
+  @@map("sandbox_gateway_transactions")
+}

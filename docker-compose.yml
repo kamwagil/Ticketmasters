@@ -1,0 +1,59 @@
+# Development infrastructure. Ports are offset from the defaults so this stack
+# does not collide with other local projects.
+name: ctp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ctp
+      POSTGRES_PASSWORD: ctp_dev_password
+      POSTGRES_DB: ctp
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=256MB"]
+    ports:
+      - "5544:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ctp -d ctp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6390:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # S3-compatible object storage for event images (SeaweedFS S3 gateway).
+  # Credentials are defined in infra/seaweedfs-s3.json.
+  objectstore:
+    image: chrislusf/seaweedfs:latest
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-volume.max=20"]
+    ports:
+      - "9010:8333"
+    volumes:
+      - miniodata:/data
+      - ./infra/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1026:1025" # SMTP
+      - "8026:8025" # Web UI + API
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

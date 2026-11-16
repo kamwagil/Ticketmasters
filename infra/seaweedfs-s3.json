@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "ctp-dev",
+      "credentials": [{ "accessKey": "ctp_dev_access", "secretKey": "ctp_dev_secret_key" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
